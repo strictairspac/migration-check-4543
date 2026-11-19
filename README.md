@@ -30,7 +30,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 4. 09:15 字段映射：委托号→sample_code、检测项→test_name、结果→result_value、单位→unit、时间→measured_at，每块4行。
 5. 09:20 提交shift-20261117对账，或运行旧字段异常样本查看重复/非法数字/空值/缺列拒绝。
 6. 09:25 查看接受/拒绝与分块证据，读取真实PG目标表。
-7. 09:30 下载reconciliation-<id>.json与backup-<id>.json，viewer复核。
+7. 09:30 下载核验凭据`credential-<id>.json`、对账凭据与备份；按委托号下载交接包交给外站。
 8. 10:00 admin回传该备份，恢复并核对摘要，查看审计完成事件。
 
 seed含三账号、三批次（三种正常/异常/空输入）、三映射。固定数值、自然键upsert式补缺，不覆盖用户编辑；连续执行不新增。
@@ -40,7 +40,21 @@ seed含三账号、三批次（三种正常/异常/空输入）、三映射。�
 
 最多2000源行、每行20列、单元格500字符；每块1-500行。逐块更新进度；取消在块间检查，最终提交前锁定run再次检查，成功目标一次提交；取消/异常没有部分目标数据。后台任务使用简单Redis单消费者；进程崩溃可能留下running状态，需人工复核并新建任务，不自动重试。
 
-下载备份为本工具目标行的逻辑JSON快照(version1)，含run_id/rows/row_hashes/checksum，不是pg_dump或物理备份，不含WAL/索引/权限。管理员恢复只允许该运行已保存checksum完全匹配的备份；先核验逐行/总体摘要、schema和自然键，再事务性替换该运行target_rows，回读重新计算摘要并保存recovery记录。篡改、错运行、未完成运行拒绝，恢复事务回滚；不能用任意新数据覆盖目标。
+下载备份为本工具目标行的逻辑JSON快照(version1)，含run_id/rows/row_hashes/checksum，不是pg_dump或物理备份，不含WAL/索引/权限。管理员恢复只允许该运行已保存checksum完全匹配的备份；先核验逐行/总体摘要、schema和自然键，再事务性替换该运行target_rows，回读重新计算摘要并保存recovery记录。篡改、错运行、未完成运行拒绝，恢复事务回滚；不能用任意新数据覆盖目标。恢复只替换目标行，完成时的result（含固定凭据）保持不变；恢复可与交接包下载并发，交接包永远按迁移完成时的记录生成。
+
+### 按委托的核验凭据与交接包
+迁移完成的事务里同时固定凭据（`result.credential`），之后下载、重试、备份恢复都不改写它。凭据含运行号、完成时间、算法/规范、"源批次委托号名单是否完整"声明，以及每个委托号的可交接承诺：行数、逐行摘要、排序后的总体摘要，末附`credential_digest`。凭据覆盖源批次中可归属的全部委托号，因此既包含有结果的委托，也包含结果为0的委托。
+
+差异核对页可下载`credential-<id>.json`，并按委托号下载`handover-<id>-<委托号>.json`：包内只有`sample_code`与该委托号完全相等的已接受目标行，不含其他委托；包声明`record_basis: migration-completion`、所用凭据摘要和承诺（`expected`）。重复下载字节一致，中断重试不更换凭据。
+
+外站离线验包：`backend/scripts/verify_handover.py`（纯标准库，不连站点/数据库）。
+```sh
+python3 backend/scripts/verify_handover.py \
+  --credential credential-12.json --entrustment JS-20261117-001 --package handover-12-JS-20261117-001.json
+```
+退出码 0 通过；3 凭据被改动/残缺；4 包被拒。可查出：少给或多给（行数/逐行/总体摘要对照凭据）、重复自然键、改值、混入其他委托（含包/行委托号不符）、错运行、非完成记录生成的包。委托号不在凭据名单中时：仅当凭据声明名单完整（`scope.entrustment_census_complete`）且包声明`expected.listed=false`、0行，才判定为"该委托本来就没有结果"；名单不完整时拒绝出结论。源批次存在无法归属委托号的行时，名单标记为不完整，页面禁用否定证明抽查。
+
+旧版本已完成的运行在读取时按当时`result`与输入快照确定性重建凭据（不写库），行为与新完成记录一致。
 
 受控场景演示旧字段到新目标结构的逻辑迁移，数据库真实保存源/映射/目标/对账。不能连接远端数据库，不宣称生产异构迁移或灾备能力。
 
